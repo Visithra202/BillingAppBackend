@@ -11,6 +11,8 @@ from django.contrib.auth.models import User
 from django.contrib.auth.hashers import make_password
 from collections import defaultdict
 from decimal import Decimal, InvalidOperation
+from django.db import transaction
+
 
 @api_view(['GET'])
 def get_logo(request):
@@ -193,6 +195,7 @@ def get_loan_list(request):
 
 
 @api_view(['GET'])
+@transaction.atomic
 def get_collection_list(request):
     today = date.today()
     loan_bills = LoanBill.objects.filter(bill_date__lte=today, paid_date__isnull=True)
@@ -239,6 +242,7 @@ def get_loan_bill(request, loan_accno):
 
 
 @api_view(['POST'])
+@transaction.atomic
 def add_loan_payment(request):
     today = date.today()
     data = request.data
@@ -292,6 +296,27 @@ def add_loan_payment(request):
         trans_command=f"{paid_amount} credited",
         trans_amount=paid_amount,
         balance=new_balance
+    )
+    
+    latest_journal_entry = LoanJournal.objects.last() 
+
+    if latest_journal_entry:
+        previous_balance = latest_journal_entry.balance_amount
+    else:
+        previous_balance = Decimal('0.00')
+            
+            
+    journal_entry = LoanJournal.objects.create(
+        loan=loan,
+        action_type='PAYMENT',
+        description="Due payment added",
+        old_data={},
+        new_data={
+            'Balance amount': float(loan.balance_amount)
+        },
+        credit=Decimal(paid_amount),
+        debit=Decimal(0.00),
+        balance_amount=previous_balance + Decimal(paid_amount)
     )
     return Response({'message': 'Payment added successfully'})
 
@@ -386,6 +411,7 @@ def user_login(request):
 
 
 @api_view(['POST'])
+@transaction.atomic
 def add_user(request):
     username = request.data.get("username")
     password = request.data.get("password")

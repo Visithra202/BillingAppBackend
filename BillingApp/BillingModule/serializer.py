@@ -5,6 +5,8 @@ from django.utils.timezone import now
 from datetime import timedelta
 from datetime import datetime
 from django.db import transaction
+from django.core.exceptions import ObjectDoesNotExist
+from decimal import Decimal
 
 
 class CompdetSerializer(serializers.ModelSerializer):
@@ -65,16 +67,14 @@ class TransactionItemSerializer(serializers.ModelSerializer):
         model = SaleItem  # Dummy model for inheritance
         fields = ['product', 'item_seq', 'quantity', 'unit_price', 'total_price']
 
-
-
-class SaleItemSerializer(serializers.ModelSerializer):
-    sale = serializers.PrimaryKeyRelatedField(read_only=True)
-    product=ItemSerializer()
-
-    class Meta:
+class SaleItemSerializer(TransactionItemSerializer):
+    sale = serializers.PrimaryKeyRelatedField(read_only=True)  
+    
+    class Meta(TransactionItemSerializer.Meta):
         model = SaleItem
-        fields = ['product', 'item_seq', 'quantity', 'unit_price', 'total_price', 'sale']
-
+        fields = TransactionItemSerializer.Meta.fields + ['sale']
+        extra_kwargs = {'sale': {'required': False}}
+        
 class PurchaseItemSerializer(TransactionItemSerializer):
     purchase = serializers.PrimaryKeyRelatedField(read_only=True)  
     
@@ -90,9 +90,9 @@ class PurchasePaymentSerializer(serializers.ModelSerializer):
         fields='__all__'
         
 class SaleSerializer(serializers.ModelSerializer):
-    sale_products = SaleItemSerializer(many=True)
+    sale_products = SaleItemSerializer(source='sale_items', many=True)
     payment = PaymentSerializer()
-    customer=CustomerSerializer()
+    customer = CustomerSerializer()
 
     class Meta:
         model = Sale
@@ -100,84 +100,60 @@ class SaleSerializer(serializers.ModelSerializer):
 
     @transaction.atomic
     def create(self, validated_data):
-        current_year = datetime.now().year
+        customer_data = validated_data.pop('customer')
+        payment_data = validated_data.pop('payment')
+        sale_items_data = validated_data.pop('sale_items', [])
 
+        customer, _ = Customer.objects.get_or_create(**customer_data)
+
+        payment = Payment.objects.create(**payment_data)
+
+        current_year = datetime.now().year
         bill, created = SaleBill.objects.get_or_create(
-            bill_year=current_year,  
-            defaults={'bill_seq': 1}  
+            bill_year=current_year,
+            defaults={'bill_seq': 1}
+        )
+        if not created:
+            bill.bill_seq += 1
+            bill.save()
+
+        validated_data['bill_no'] = f'BILL-{current_year}-{bill.bill_seq:02d}'
+
+        sale = Sale.objects.create(
+            customer=customer,
+            payment=payment,
+            sale_seq=bill.bill_seq - 1,
+            **validated_data
         )
 
-        if not created:
-            bill.bill_seq += 1  
-            bill.save()
-        print(validated_data)
-        sale_products_data = validated_data.pop('sale_products', [])
-        print("sale_products_data -------------------------------------------------------------")
-        print(sale_products_data)
-        payment_data = validated_data.pop('payment', {})
-        customer_data= validated_data.pop('customer', {})
-        
-        payment = Payment.objects.create(**payment_data)
-        customer, created = Customer.objects.get_or_create(**customer_data)
-        sale = Sale.objects.create(payment=payment, customer=customer, sale_seq=bill.bill_seq-1,  **validated_data)
+        for index, item_data in enumerate(sale_items_data):
+            product_data = item_data.pop("product")
 
-        for index, product_data in enumerate(sale_products_data):
-            # print("product data-----------------------------------------------------------------------------------------------------------")
-            # print(product_data)
-            # item=Item.objects.get()
-            # print("item ------------------------------------------------------------------------------------------------------------------------")
-            # print(item)
-            
-            # product_id = product_data.get("product")
-            # item = Item.objects.get(item_id=product_id)
-            item = product_data.pop('product')  
+            try:
+                item = Item.objects.get(
+                    item_name=product_data['item_name'],
+                    category=product_data['category'],
+                    brand=product_data['brand'],
+                    sale_price=product_data['sale_price']
+                )
 
-            # if (item.quantity>=product_data['quantity']):
-            #     item.quantity-=product_data['quantity']
-            #     item.save()
-            saleItem=SaleItem.objects.create(sale=sale,
-                item_seq=index + 1,
-                product=item,
-                quantity=product_data['quantity'],
-                unit_price=product_data['unit_price'],
-                total_price=product_data['total_price']
-                )  
-            # else:
-            #     raise serializers.ValidationError(f"Not enough stock for {item.item_name}")
+                if item.quantity >= item_data['quantity']:
+                    item.quantity -= item_data['quantity']
+                    item.save()
 
-          
+                    SaleItem.objects.create(
+                        sale=sale,
+                        item_seq=index + 1,
+                        product=item,
+                        **item_data
+                    )
+                else:
+                    raise serializers.ValidationError(f"Not enough stock for {item.item_name}")
+
+            except ObjectDoesNotExist:
+                raise serializers.ValidationError(f"Item '{product_data['item_name']}' not found.")
+
         return sale
-
-# class SaleSerializer(serializers.ModelSerializer):
-#     customer = CustomerSerializer()
-#     payment = PaymentSerializer()
-#     sale_products = SaleItemSerializer(many=True, source='sale_items')
-
-#     class Meta:
-#         model = Sale
-#         fields ='__all__'
-
-#     def create(self, validated_data):
-#         # Extract nested data
-#         customer_data = validated_data.pop('customer')
-#         payment_data = validated_data.pop('payment')
-#         sale_items_data = validated_data.pop('sale_items', [])
-
-#         # Create or get related objects
-#         customer, _ = Customer.objects.get_or_create(**customer_data)
-#         payment = Payment.objects.create(**payment_data)
-        
-#         sale = Sale.objects.create(customer=customer, payment=payment, **validated_data)
-
-#         for item_data in sale_items_data:
-#             product_data = item_data.pop('product')
-#             print(payment_data)
-#             product = Item.objects.get(item_id=product_data['item_id'])
-#             SaleItem.objects.create(sale=sale, product=product, **item_data)
-
-#         return sale
-
-
 
 class SellerSerializer(serializers.ModelSerializer):
     class Meta:
@@ -185,41 +161,66 @@ class SellerSerializer(serializers.ModelSerializer):
         fields = '__all__'
 
 class PurchaseSerializer(serializers.ModelSerializer):
-    purchase_products=PurchaseItemSerializer(many=True, source='purchase_items')
-    purchase_payment=PurchasePaymentSerializer()
-    seller=SellerSerializer()
-    
+    purchase_products = PurchaseItemSerializer(source='purchase_items', many=True)
+    purchase_payment = PurchasePaymentSerializer()
+    seller = SellerSerializer()
+
     class Meta:
         model = Purchase
         fields = ['purchase_id', 'purchase_date', 'seller', 'purchase_payment', 'total_amount', 'discount', 'purchase_products', 'balance']
-    
+
+    @transaction.atomic
     def create(self, validated_data):
-        current_year=datetime.now().year
-        
-        bill, created=PurchaseBill.objects.get_or_create(
-            bill_year = current_year,
-            defaults= {'bill_seq':1}
+        seller_data = validated_data.pop('seller')
+        payment_data = validated_data.pop('purchase_payment')
+        purchase_items_data = validated_data.pop('purchase_items', [])
+
+        seller, _ = Seller.objects.get_or_create(**seller_data)
+
+        payment = PurchasePayment.objects.create(**payment_data)
+
+        current_year = datetime.now().year
+        bill, created = PurchaseBill.objects.get_or_create(
+            bill_year=current_year,
+            defaults={'bill_seq': 1}
         )
-        
         if not created:
-            bill.bill_seq+=1
+            bill.bill_seq += 1
             bill.save()
-            
-        purchase_products_data=validated_data.pop('purchase_items', [])
-        payment_data=validated_data.pop('purchase_payment', {})
-        seller_data=validated_data.pop('seller', {})
-        
-        purchase_payment=PurchasePayment.objects.create(**payment_data)
-        seller, created=Seller.objects.get_or_create(**seller_data)
-        purchase=Purchase.objects.create(purchase_payment=purchase_payment, seller=seller, purchase_seq=bill.bill_seq-1, **validated_data)
-        
-        for index, product_data in enumerate(purchase_products_data):
-            item=Item.objects.get(item_id=product_data['product'].item_id)
-            item.quantity+=product_data['quantity']
-            item.save()
-            purchaseItem=PurchaseItem.objects.create(purchase=purchase, item_seq=index+1, **product_data)
-            
-        
+
+        validated_data['purchase_id'] = f'PUR-{current_year}-{bill.bill_seq:02d}'
+
+        purchase = Purchase.objects.create(
+            seller=seller,
+            purchase_payment=payment,
+            purchase_seq=bill.bill_seq - 1,
+            **validated_data
+        )
+
+        for index, item_data in enumerate(purchase_items_data):
+            product_data = item_data.pop("product")
+
+            try:
+                item = Item.objects.get(
+                    item_name=product_data['item_name'],
+                    category=product_data['category'],
+                    brand=product_data['brand'],
+                    sale_price=product_data['sale_price']
+                )
+
+                item.quantity += item_data['quantity']
+                item.save()
+
+                PurchaseItem.objects.create(
+                    purchase=purchase,
+                    item_seq=index + 1,
+                    product=item,
+                    **item_data
+                )
+
+            except ObjectDoesNotExist:
+                raise serializers.ValidationError(f"Item '{product_data['item_name']}' not found.")
+
         return purchase
 
 class LoanSerializer(serializers.ModelSerializer):
@@ -266,6 +267,29 @@ class LoanSerializer(serializers.ModelSerializer):
                 total_due=loan.emi_amount,
             )
             due_date += interval
+        
+        latest_journal_entry = LoanJournal.objects.last() 
+
+        if latest_journal_entry:
+            previous_balance = latest_journal_entry.balance_amount
+        else:
+            previous_balance = Decimal('0.00')
+            
+            
+        journal_entry = LoanJournal.objects.create(
+            loan=loan,
+            action_type='CREATED',
+            description="Loan Issued with Initial Amount",
+            old_data={},
+            new_data={
+                'Loan amount': float(loan.loan_amount),
+                'Emi amount': float(loan.emi_amount)
+            },
+            credit=Decimal(0.00),
+            debit=Decimal(loan.loan_amount),
+            balance_amount=previous_balance - Decimal(loan.loan_amount)
+        )
+
 
         return loan
     
