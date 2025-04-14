@@ -9,8 +9,8 @@ from django.http import JsonResponse
 from django.contrib.auth import authenticate
 from django.contrib.auth.models import User
 from django.contrib.auth.hashers import make_password
-
-
+from collections import defaultdict
+from decimal import Decimal, InvalidOperation
 
 @api_view(['GET'])
 def get_logo(request):
@@ -139,7 +139,7 @@ def get_sale_bill_no(request):
 # Sale
 @api_view(['POST'])
 def add_sale(request):
-    serializer=SaleSerializer(data=request.data)
+    serializer=SaleSerializer(data= request.data)
     print(request.data)
     if serializer.is_valid():
         serializer.save()
@@ -190,6 +190,112 @@ def get_loan_list(request):
     loanList=Loan.objects.all()
     serializer = LoanSerializer(loanList, many=True)
     return Response(serializer.data, status=status.HTTP_200_OK)
+
+
+@api_view(['GET'])
+def get_collection_list(request):
+    today = date.today()
+    loan_bills = LoanBill.objects.filter(bill_date__lte=today, paid_date__isnull=True)
+
+    overdue_loans_dict = defaultdict(lambda: {'due_amount': Decimal('0.00'), 'late_fee': Decimal('0.00')})
+
+    for bill in loan_bills:
+        acc_no = bill.loan_acc.loan_accno
+        overdue_loans_dict[acc_no]['customer'] = {
+            'customer_name': bill.loan_acc.customer.customer_name,
+            'mph': str(bill.loan_acc.customer.mph)
+        }
+        overdue_loans_dict[acc_no]['loan_accno'] = acc_no
+        overdue_loans_dict[acc_no]['due_amount'] += (bill.due_amount- bill.paid_amount)
+        overdue_loans_dict[acc_no]['late_fee'] += bill.late_fee
+
+    overdue_loans = [{
+        'customer': data['customer'],
+        'loan_accno': acc_no,
+        'due_amount': str(data['due_amount']),
+        'late_fee': str(data['late_fee']),
+    } for acc_no, data in overdue_loans_dict.items()]
+
+    return JsonResponse({'overdue_loans': overdue_loans})
+
+
+@api_view(['GET'])
+def get_loan_bill(request, loan_accno):
+    today=date.today()
+    loan_bills = LoanBill.objects.filter(loan_acc__loan_accno=loan_accno).order_by('bill_date')
+    bills_data = []
+    for bill in loan_bills:
+        if bill.paid_date is None and bill.bill_date <= today :
+            bills_data.append({
+                'bill_seq': bill.bill_seq,
+                'bill_date': bill.bill_date.strftime('%Y-%m-%d'),
+                'due_amount': str(bill.due_amount),
+                'late_fee': str(bill.late_fee),
+                'total_due': bill.total_due,
+                'paid_amount' : bill.paid_amount
+            })
+
+    return JsonResponse({'loan_bills': bills_data})
+
+
+@api_view(['POST'])
+def add_loan_payment(request):
+    today = date.today()
+    data = request.data
+
+    loan_accno = data.get('loan_accno')
+    try:
+        payment_amount = Decimal(data.get('payment_amount'))
+    except (TypeError, InvalidOperation):
+        return Response({'error': 'Invalid payment amount'}, status=400)
+
+    paid_amount=payment_amount
+    loan = Loan.objects.get(loan_accno=loan_accno)
+    loan_bills = LoanBill.objects.filter(
+        loan_acc__loan_accno=loan_accno,
+        paid_date__isnull=True
+    ).order_by('bill_date')
+
+    for bill in loan_bills:
+        remaining_due = bill.total_due - bill.paid_amount  # includes late_fee
+        principal_due = bill.due_amount - min(bill.paid_amount, bill.due_amount)
+
+        if payment_amount >= remaining_due:
+            bill.paid_amount += remaining_due
+            bill.paid_date = today
+            loan.bal_amount -= principal_due
+            payment_amount -= remaining_due
+        else:
+            bill.paid_amount += payment_amount
+            if bill.paid_amount >= bill.total_due:
+                bill.paid_date = today
+
+            # Pay principal first
+            amount_toward_due = min(payment_amount, principal_due)
+            loan.bal_amount -= amount_toward_due
+            payment_amount = Decimal('0.00')
+
+        bill.save()
+        if payment_amount == 0:
+            break
+
+    loan.save()
+    last_hist = GlHist.objects.order_by('-trans_seq').first()
+
+    prev_balance = last_hist.balance if last_hist else Decimal('0.00')
+    new_balance = prev_balance + paid_amount
+
+    GlHist.objects.create(
+        date=today,
+        loan_acc=loan,
+        credit=1, 
+        trans_command=f"{paid_amount} credited",
+        trans_amount=paid_amount,
+        balance=new_balance
+    )
+    return Response({'message': 'Payment added successfully'})
+
+
 
 # Purchase
 @api_view(['POST'])
@@ -316,3 +422,4 @@ def delete_user(request, user_id):
         return Response({"message": "User deleted successfully!"}, status=status.HTTP_200_OK)
     except User.DoesNotExist:
         return Response({"error": "User not found."}, status=status.HTTP_404_NOT_FOUND)
+    

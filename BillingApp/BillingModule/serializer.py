@@ -4,6 +4,7 @@ from phonenumber_field.modelfields import PhoneNumberField
 from django.utils.timezone import now
 from datetime import timedelta
 from datetime import datetime
+from django.db import transaction
 
 
 class CompdetSerializer(serializers.ModelSerializer):
@@ -24,10 +25,7 @@ class BrandSerializer(serializers.ModelSerializer):
 class ItemSerializer(serializers.ModelSerializer):
     class Meta:
         model = Item
-        fields = ['item_id', 'item_name', 'category', 'brand', 'quantity',
-                  'min_stock', 'purchase_price', 'sale_price', 'tax_option',
-                  'mrp', 'discount_type', 'discount']
-        read_only_fields = ['item_id'] 
+        fields = ['item_id', 'item_name', 'category', 'brand', 'quantity', 'min_stock', 'purchase_price', 'sale_price', 'tax_option', 'mrp', 'discount_type', 'discount']
 
     def validate(self, data):
         if data['sale_price'] > data['mrp']:
@@ -61,21 +59,22 @@ class PaymentSerializer(serializers.ModelSerializer):
 
 
 class TransactionItemSerializer(serializers.ModelSerializer):
-    product=ItemSerializer()
-    
+    product = ItemSerializer()
+
     class Meta:
+        model = SaleItem  # Dummy model for inheritance
         fields = ['product', 'item_seq', 'quantity', 'unit_price', 'total_price']
-        abstract = True  
 
 
-class SaleItemSerializer(TransactionItemSerializer):
-    sale = serializers.PrimaryKeyRelatedField(read_only=True)  
-    
-    class Meta(TransactionItemSerializer.Meta):
+
+class SaleItemSerializer(serializers.ModelSerializer):
+    sale = serializers.PrimaryKeyRelatedField(read_only=True)
+    product=ItemSerializer()
+
+    class Meta:
         model = SaleItem
-        fields = TransactionItemSerializer.Meta.fields + ['sale']
-        extra_kwargs = {'sale': {'required': False}}
-        
+        fields = ['product', 'item_seq', 'quantity', 'unit_price', 'total_price', 'sale']
+
 class PurchaseItemSerializer(TransactionItemSerializer):
     purchase = serializers.PrimaryKeyRelatedField(read_only=True)  
     
@@ -91,7 +90,7 @@ class PurchasePaymentSerializer(serializers.ModelSerializer):
         fields='__all__'
         
 class SaleSerializer(serializers.ModelSerializer):
-    sale_products = SaleItemSerializer(many=True, source='sale_items')
+    sale_products = SaleItemSerializer(many=True)
     payment = PaymentSerializer()
     customer=CustomerSerializer()
 
@@ -99,6 +98,7 @@ class SaleSerializer(serializers.ModelSerializer):
         model = Sale
         fields = ['bill_no', 'sale_date', 'customer', 'payment', 'total_amount', 'discount', 'sale_products', 'balance']
 
+    @transaction.atomic
     def create(self, validated_data):
         current_year = datetime.now().year
 
@@ -110,8 +110,10 @@ class SaleSerializer(serializers.ModelSerializer):
         if not created:
             bill.bill_seq += 1  
             bill.save()
-
-        sale_products_data = validated_data.pop('sale_items', [])
+        print(validated_data)
+        sale_products_data = validated_data.pop('sale_products', [])
+        print("sale_products_data -------------------------------------------------------------")
+        print(sale_products_data)
         payment_data = validated_data.pop('payment', {})
         customer_data= validated_data.pop('customer', {})
         
@@ -120,15 +122,28 @@ class SaleSerializer(serializers.ModelSerializer):
         sale = Sale.objects.create(payment=payment, customer=customer, sale_seq=bill.bill_seq-1,  **validated_data)
 
         for index, product_data in enumerate(sale_products_data):
+            # print("product data-----------------------------------------------------------------------------------------------------------")
+            # print(product_data)
+            # item=Item.objects.get()
+            # print("item ------------------------------------------------------------------------------------------------------------------------")
+            # print(item)
             
-            item=Item.objects.get(item_id=product_data['product'].item_id)
+            # product_id = product_data.get("product")
+            # item = Item.objects.get(item_id=product_id)
+            item = product_data.pop('product')  
 
-            if (item.quantity>=product_data['quantity']):
-                item.quantity-=product_data['quantity']
-                item.save()
-                saleItem=SaleItem.objects.create(sale=sale, item_seq=index + 1, **product_data)  
-            else:
-                raise serializers.ValidationError(f"Not enough stock for {item.item_name}")
+            # if (item.quantity>=product_data['quantity']):
+            #     item.quantity-=product_data['quantity']
+            #     item.save()
+            saleItem=SaleItem.objects.create(sale=sale,
+                item_seq=index + 1,
+                product=item,
+                quantity=product_data['quantity'],
+                unit_price=product_data['unit_price'],
+                total_price=product_data['total_price']
+                )  
+            # else:
+            #     raise serializers.ValidationError(f"Not enough stock for {item.item_name}")
 
           
         return sale
@@ -206,13 +221,6 @@ class PurchaseSerializer(serializers.ModelSerializer):
             
         
         return purchase
-    
-        
-class SellerSerializer(serializers.ModelSerializer):
-    class Meta:
-        model = Seller
-        fields = '__all__'
-
 
 class LoanSerializer(serializers.ModelSerializer):
     customer= CustomerSerializer()
@@ -222,6 +230,7 @@ class LoanSerializer(serializers.ModelSerializer):
         fields = '__all__'
         read_only_fields = ['loan_accno']  
 
+    @transaction.atomic
     def create(self, validated_data):
         """Creates a Loan and auto-generates LoanBill entries"""
         today = date.today().strftime("%Y%m%d")  
@@ -239,20 +248,31 @@ class LoanSerializer(serializers.ModelSerializer):
         customer, created = Customer.objects.get_or_create(**customer_data)
         loan = Loan.objects.create(loan_accno=loan_accno, customer=customer, **validated_data)
 
-        due_date = loan.next_payment_date
-        frequency_map = {"Monthly": 30, "Weekly": 7, "Daily": 1}
-        interval = timedelta(days=frequency_map.get(loan.payment_frequency, 30))
+        due_date = loan.next_pay_date
+        frequency_map = {"Monthly": 30, "Weekly": 7}
+        interval = timedelta(days=frequency_map.get(loan.payment_freq, 30))
 
-        for seq in range(1, loan.term + 1):
+        if loan.payment_freq == "Weekly":
+            total_bills = loan.term * 4 
+        else:
+            total_bills = loan.term
+
+        for seq in range(1, total_bills + 1):
             LoanBill.objects.create(
                 loan_acc=loan,
                 bill_seq=seq,
                 bill_date=due_date,
+                due_amount=loan.emi_amount,
                 total_due=loan.emi_amount,
-                payment_status="Pending"
             )
-            due_date += interval  
+            due_date += interval
 
         return loan
     
+class GlHistSerializer(serializers.ModelSerializer):
+
+    class Meta:
+        model = GlHist
+        fields = '__all__'
+
     
