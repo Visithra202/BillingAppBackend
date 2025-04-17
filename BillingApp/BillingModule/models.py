@@ -140,10 +140,10 @@ class Loan(models.Model):
     loan_date=models.DateField(default=date.today)
     next_pay_date=models.DateField()
     bal_amount=models.DecimalField(max_digits=10, decimal_places=2, default=0)
+    # loan_bills=models.ManyToManyField(through='LoanBill')
     
     def __str__(self):
         return self.loan_accno
-    
     
 class LoanBill(models.Model):
     loan_acc=models.ForeignKey('Loan', on_delete=models.CASCADE)
@@ -167,14 +167,15 @@ class Seller(models.Model):
 
 class LoanJournal(models.Model):
     journal_id=models.AutoField(primary_key=True)
-    ACTION_CHOICES = [('CREATED', 'Loan Issued'), ('PAYMENT', 'Payment Made'),('UPDATED', 'Loan Updated'),('CLOSED', 'Loan Closed')]
+    journal_date=models.DateField(default=now)
     loan = models.ForeignKey(Loan, on_delete=models.CASCADE, related_name='journal_entries')
-    action_type = models.CharField(max_length=20, choices=ACTION_CHOICES)
+    action_type = models.CharField(max_length=50)
     description = models.TextField()
-    old_data = models.JSONField(null=True, blank=True)
-    new_data = models.JSONField(null=True, blank=True)
-    credit=models.DecimalField(max_digits=10, decimal_places=2)
-    debit=models.DecimalField(max_digits=10, decimal_places=2)
+    old_data = models.DecimalField(max_digits=10,decimal_places=2, null=True, blank=True)
+    new_data = models.DecimalField(max_digits=10, decimal_places=2, null=True, blank=True)
+    credit=models.BooleanField(default=False)
+    debit=models.BooleanField(default=False)
+    trans_amt=models.DecimalField(max_digits=10, decimal_places=2)
     balance_amount=models.DecimalField(max_digits=10, decimal_places=2)
 
     def __str__(self):

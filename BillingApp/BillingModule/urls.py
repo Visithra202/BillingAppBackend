@@ -51,6 +51,7 @@ urlpatterns=[
     path('get-collection-list/', get_collection_list, name='get_collection_list'),
     path('get-loan-bill/<str:loan_accno>', get_loan_bill, name='get_loan_bill'),
     path('add-loan-payment/', add_loan_payment, name='add_loan_payment'),
+    path('get-loan-journal/<str:loan_accno>/', get_loan_journal, name='get_loan_journal'),
     
     # Purchase
     path('add-purchase/', add_purchase, name='add_purchase'),

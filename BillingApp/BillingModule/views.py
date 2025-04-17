@@ -235,7 +235,8 @@ def get_loan_bill(request, loan_accno):
                 'due_amount': str(bill.due_amount),
                 'late_fee': str(bill.late_fee),
                 'total_due': bill.total_due,
-                'paid_amount' : bill.paid_amount
+                'paid_amount' : bill.paid_amount,
+                'paid_date' : bill.paid_date
             })
 
     return JsonResponse({'loan_bills': bills_data})
@@ -255,6 +256,8 @@ def add_loan_payment(request):
 
     paid_amount=payment_amount
     loan = Loan.objects.get(loan_accno=loan_accno)
+    prev_loanbalance=loan.bal_amount
+    
     loan_bills = LoanBill.objects.filter(
         loan_acc__loan_accno=loan_accno,
         paid_date__isnull=True
@@ -298,25 +301,24 @@ def add_loan_payment(request):
         balance=new_balance
     )
     
-    latest_journal_entry = LoanJournal.objects.last() 
+    latest_journal_entry = LoanJournal.objects.filter(loan__loan_accno=loan.loan_accno).order_by('-journal_id').first() 
 
     if latest_journal_entry:
-        previous_balance = latest_journal_entry.balance_amount
+        previous_data = latest_journal_entry.new_data
     else:
-        previous_balance = Decimal('0.00')
+        previous_data = Decimal('0.00')
             
             
     journal_entry = LoanJournal.objects.create(
         loan=loan,
+        journal_date=today,
         action_type='PAYMENT',
         description="Due payment added",
-        old_data={},
-        new_data={
-            'Balance amount': float(loan.balance_amount)
-        },
-        credit=Decimal(paid_amount),
-        debit=Decimal(0.00),
-        balance_amount=previous_balance + Decimal(paid_amount)
+        old_data=previous_data,
+        new_data=previous_data-paid_amount,
+        credit=True,
+        trans_amt=paid_amount,
+        balance_amount=previous_data - paid_amount
     )
     return Response({'message': 'Payment added successfully'})
 
@@ -448,4 +450,11 @@ def delete_user(request, user_id):
         return Response({"message": "User deleted successfully!"}, status=status.HTTP_200_OK)
     except User.DoesNotExist:
         return Response({"error": "User not found."}, status=status.HTTP_404_NOT_FOUND)
+    
+# Loan Journal
+@api_view(['GET'])
+def get_loan_journal(request, loan_accno):
+    journals=LoanJournal.objects.filter(loan__loan_accno=loan_accno).order_by('journal_id')
+    serializer=LoanJournalSerializer(journals, many=True)
+    return Response(serializer.data, status=status.HTTP_200_OK)
     

@@ -268,29 +268,24 @@ class LoanSerializer(serializers.ModelSerializer):
             )
             due_date += interval
         
-        latest_journal_entry = LoanJournal.objects.last() 
+        # latest_journal_entry = LoanJournal.objects.last() 
 
-        if latest_journal_entry:
-            previous_balance = latest_journal_entry.balance_amount
-        else:
-            previous_balance = Decimal('0.00')
+        # if latest_journal_entry:
+        #     previous_balance = latest_journal_entry.balance_amount
+        # else:
+        #     previous_balance = Decimal('0.00')
             
             
         journal_entry = LoanJournal.objects.create(
             loan=loan,
-            action_type='CREATED',
-            description="Loan Issued with Initial Amount",
-            old_data={},
-            new_data={
-                'Loan amount': float(loan.loan_amount),
-                'Emi amount': float(loan.emi_amount)
-            },
-            credit=Decimal(0.00),
-            debit=Decimal(loan.loan_amount),
-            balance_amount=previous_balance - Decimal(loan.loan_amount)
+            journal_date=today,
+            action_type='CREATE',
+            description="Loan account creation",
+            new_data=Decimal(loan.loan_amount),
+            debit=True,
+            trans_amt=Decimal(loan.loan_amount),
+            balance_amount=Decimal(loan.loan_amount)
         )
-
-
         return loan
     
 class GlHistSerializer(serializers.ModelSerializer):
@@ -299,4 +294,7 @@ class GlHistSerializer(serializers.ModelSerializer):
         model = GlHist
         fields = '__all__'
 
-    
+class LoanJournalSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = LoanJournal
+        fields = '__all__'
